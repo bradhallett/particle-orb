@@ -1,0 +1,147 @@
+// 14 ── Particle Orb: AI Canvas' Particle Sphere rendering (aicanvas.me/
+// components/particle-sphere, MIT — 9,000 sprite dots, additive blending,
+// tilt, slow spin) with the VoiceOrbs state vocabulary animated per particle
+// in the vertex shader: listening ripples ride the voice, thinking contracts
+// inward with jitter, idle drifts. Colour is per-particle dispersed (each state's colour →
+// partner colour, mixed by a per-dot hash; idle anchors #818cf8 → #22d3ee), not hemisphere-split.
+KINDS.particles = ctx => {
+  const COUNT = 9000, TAU = Math.PI * 2;
+  const pos = new Float32Array(COUNT * 3), tone = new Float32Array(COUNT), seed = new Float32Array(COUNT), ring = new Float32Array(COUNT);
+  for (let i = 0; i < COUNT; i++) {
+    const theta = Math.acos(2 * Math.random() - 1), phi = TAU * Math.random();
+    const r = 1 + (Math.random() - .5) * .14;
+    pos.set([r * Math.sin(theta) * Math.cos(phi), r * Math.cos(theta), r * Math.sin(theta) * Math.sin(phi)], i * 3);
+    tone[i] = (i * .5436890126) % 1; seed[i] = ((i * .7548776662) % 1) * TAU; ring[i] = (i * .61803398875) % 1;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('aTone', new THREE.BufferAttribute(tone, 1));
+  geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+  geo.setAttribute('aRing', new THREE.BufferAttribute(ring, 1));
+  const sprite = new THREE.CanvasTexture((() => {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+    const g = cv.getContext('2d'), h = 32, grad = g.createRadialGradient(h, h, 0, h, h, h);
+    grad.addColorStop(0, 'rgba(255,255,255,1)'); grad.addColorStop(.2, 'rgba(255,255,255,.8)');
+    grad.addColorStop(.55, 'rgba(255,255,255,.25)'); grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, 64, 64); return cv;
+  })());
+  // Stage palette in OKLCh (perceptually uniform): every state differs on hue AND lightness,
+  // so separation survives single-channel collapse (incl. red-green colourblindness); the
+  // audit below checks that claim on the final colours. Inputs — also the host hook
+  // look.setPalette (pass a full cfg; omitted axes reset to these defaults): hue rotates the
+  // scheme (identity -83.07 = brand indigo), spread scales stage-hue offsets (0 = monochrome,
+  // 1 = consensus), per-stage {l,c,h} overrides merge on top.
+  const PALETTE_CFG = { hue: -83.065, spread: 1 };
+  // Exact OKLCh of the consensus hexes: idle #818cf8, listening #00e5ff, thinking #7000ff,
+  // speaking #ff007b, anchor #22d3ee, mint #00ff88. [L, C, h] — L doubles as the state ladder
+  // (.51 think → .64 speak → .68 idle → .84 listen) that keeps deuteranopic ΔE nonzero.
+  const OKLCH = { idle: [.680113, .158303, -83.0651], listening: [.844151, .145654, -150.7149], thinking: [.513555, .293025, -71.3334], speaking: [.643947, .259105, 4.0326], anchor: [.797116, .133888, -148.4698], mint: [.876280, .227789, 152.5496] };
+  const lchLin = (L, C, h) => { const a = C * Math.cos(h * Math.PI / 180), b = C * Math.sin(h * Math.PI / 180),
+    l = (L + .3963377774 * a + .2158037573 * b) ** 3, m = (L - .1055613458 * a - .0638541728 * b) ** 3, s = (L - .0894841775 * a - 1.2914855480 * b) ** 3;
+    return [4.0767416621 * l - 3.3077115913 * m + .2309699292 * s, -1.2684380046 * l + 2.6097574011 * m - .3413193965 * s, -.0041960863 * l - .7034186147 * m + 1.7076147010 * s]; };
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) ? n : d; };
+  // Gamut mapping along chroma (bisection) keeps L and h — the legibility structure — exact;
+  // the clamp is only the outer guard. No-op for the in-gamut default.
+  const linColor = (L, C, h) => {
+    let v = lchLin(L, C, h);
+    if (v.some(x => x < 0 || x > 1)) { let lo = 0, hi = C;
+      for (let i = 0; i < 8; i++) { const mid = (lo + hi) / 2; lchLin(L, mid, h).some(x => x < 0 || x > 1) ? hi = mid : lo = mid; }
+      v = lchLin(L, lo, h); }
+    return new THREE.Color().setRGB(clamp(v[0]), clamp(v[1]), clamp(v[2]));
+  };
+  // Final-output legibility audit (init-time): cross-state pairwise OKLab ΔE of each state's
+  // colour and its A/B ensemble, normal and deuteranopic (Viénot projection) — checks the
+  // property the L ladder exists for instead of a hue-angle proxy.
+  const lin2ok = v => { const l = Math.cbrt(.4122214708 * v[0] + .5363325363 * v[1] + .0514459929 * v[2]),
+    m = Math.cbrt(.2119034982 * v[0] + .6806995451 * v[1] + .1073969566 * v[2]), s = Math.cbrt(.0883024619 * v[0] + .2817188376 * v[1] + .6299787005 * v[2]);
+    return [.2104542553 * l + .7936177850 * m - .0040720468 * s, 1.9779984951 * l - 2.4285922050 * m + .4505937099 * s, .0259040371 * l + .7827717662 * m - .8086757660 * s]; };
+  const deutan = v => { const d = .625 * v[0] + .375 * v[1]; return [d, d, .0125 * v[2] + .9875 * d]; };
+  const dE = (x, y) => Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
+  function auditSeparation(A, B) {
+    const E = {}, o = k => [A[k].r, A[k].g, A[k].b];
+    for (const k of STATES) E[k] = [(A[k].r + B[k].r) / 2, (A[k].g + B[k].g) / 2, (A[k].b + B[k].b) / 2];
+    for (let i = 0; i < STATES.length; i++) for (let j = i + 1; j < STATES.length; j++)
+      for (const [x, y] of [[o(STATES[i]), o(STATES[j])], [o(STATES[i]), E[STATES[j]]], [E[STATES[i]], o(STATES[j])], [E[STATES[i]], E[STATES[j]]]]) {
+        if (dE(lin2ok(x), lin2ok(y)) < .04) console.warn('particle-orb: palette states', STATES[i], 'and', STATES[j], 'have ΔE below legibility');
+        if (dE(lin2ok(deutan(x)), lin2ok(deutan(y))) < .02) console.warn('particle-orb: palette states', STATES[i], 'and', STATES[j], 'near-indistinguishable for red-green colourblind viewers');
+      }
+  }
+  function derivePalette({ hue, spread, ...over } = {}) {
+    hue = num(hue, PALETTE_CFG.hue); spread = num(spread, PALETTE_CFG.spread);
+    for (const k in over) if (!(k in OKLCH)) console.warn('particle-orb: unknown palette stage override:', k);
+    const base = OKLCH.idle[2];
+    const pick = k => { const [l, c, h0] = OKLCH[k], o = over[k];
+      if (o?.l != null && (o.l < .1 || o.l > .9)) console.warn('particle-orb: palette L', o.l, 'outside [.1,.9] risks invisible or bloom-washed particles');
+      if (o?.c != null && o.c < 0) console.warn('particle-orb: negative palette C acts as h+180°');
+      return linColor(num(o?.l, l), num(o?.c, c), num(o?.h, hue + (h0 - base) * spread)); };
+    const A = {}, B = {}, anchor = pick('anchor');
+    for (const k of STATES) { A[k] = pick(k); B[k] = k === 'listening' ? pick('mint') : anchor; }
+    auditSeparation(A, B);
+    return { A, B };
+  }
+  let pal = derivePalette(PALETTE_CFG);
+  const blend = (out, p, w) => out.setRGB(
+    p.idle.r * w.idle + p.listening.r * w.listening + p.thinking.r * w.thinking + p.speaking.r * w.speaking,
+    p.idle.g * w.idle + p.listening.g * w.listening + p.thinking.g * w.thinking + p.speaking.g * w.speaking,
+    p.idle.b * w.idle + p.listening.b * w.listening + p.thinking.b * w.thinking + p.speaking.b * w.speaking);
+  const u = { uT: { value: 0 }, uSpin: { value: 0 }, uLevel: { value: 0 }, uW: { value: new THREE.Vector4(1, 0, 0, 0) },
+    uPx: { value: 8 }, uA: { value: pal.A.idle.clone() }, uB: { value: pal.B.idle.clone() }, uPoke: { value: 0 }, uSpeak: { value: 0 }, uMap: { value: sprite } };
+  const mat = new THREE.ShaderMaterial({ uniforms: u, transparent: true, depthWrite: false, toneMapped: false,
+    blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor,
+    vertexShader: `attribute float aSeed,aTone,aRing;uniform float uT,uSpin,uLevel,uPx,uPoke,uSpeak;uniform vec4 uW;varying float vTone,vDepth,vFade;
+const float SSF=1.1025;// STAGE_SCALE^2 — folds the uPx dimensional fix so tuned pixel sizes are unchanged
+void main(){
+  vec3 p=position;
+  float idle=uW.x,listen=uW.y,think=uW.z,speak=uW.w;
+  // Speaking swirls lines of latitude as the sphere turns.
+  float tw=uSpin+.45*speak*(.4+.6*uLevel)*sin(p.y*2.4+uT*1.6);
+  float c=cos(tw),s=sin(tw);p=vec3(c*p.x-s*p.z,p.y,s*p.x+c*p.z);
+  float r=length(p);
+  // Listening: ripples that ride the voice. Thinking: travelling contraction rings. Speaking: streams pulled inward.
+  r*=1.+listen*(.14+.30*uLevel)*(.6+.4*sin(p.y*4.5-uT*6.5));
+  r*=1.-.28*think*(.45+.55*(.5+.5*sin(uT*2.6)))*(.5+.5*sin(aRing*6.2831+uT*3.1));
+  float stream=.5+.5*sin(aSeed*3.-uT*3.4);
+  r*=1.-.65*speak*(.12+.5*uSpeak)*stream*stream;
+  r*=1.-.06*uPoke;
+  r*=1.+.012*idle*sin(uT*.9);
+  p=normalize(p+1e-6)*r;
+  // Idle drift; speaking jitter.
+  p+=.055*idle*(.6+.4*sin(aSeed*2.))*vec3(sin(uT*.55+aSeed*3.7),cos(uT*.62+aSeed*2.9),sin(uT*.48+aSeed*5.1));
+  p+=.026*speak*(.05+.09*uLevel)*vec3(sin(uT*14.+aSeed*9.3),cos(uT*17.+aSeed*6.1),sin(uT*11.+aSeed*7.7));
+  vec4 mv=modelViewMatrix*vec4(p,1.);
+  float depth=clamp((8.+mv.z)*.5,0.,1.);          // 1 front (z -6), 0 back (z -8)
+  vDepth=depth;vTone=aTone;
+  vFade=(.7+depth*depth*.78)*(.7+.3*idle*(1.+.06*sin(uT*.9))+.15*listen+.12*think+.15*speak+.3*uPoke);
+  gl_PointSize=max(1.6,(1.1+depth*2.2)*uPx*(.011+.005*uLevel*listen+.001*listen+.006*uPoke)/SSF);
+  gl_Position=projectionMatrix*mv;
+}`,
+    fragmentShader: `uniform vec3 uA,uB;uniform sampler2D uMap;varying float vTone,vDepth,vFade;
+void main(){
+  float a=texture2D(uMap,gl_PointCoord).a*vFade;
+  vec3 col=mix(uA,uB,vTone)*(.7+.5*vDepth);
+  gl_FragColor=vec4(col*a,a);
+}` });
+  const cloud = new THREE.Points(geo, mat);
+  cloud.rotation.x = .28; cloud.rotation.z = .08;
+  ctx.stage.add(cloud);
+  let spin = 0, poke = 0, pokeRise = 0, speakE = 0;
+  const look = { bloom: { strength: .26, radius: .5, threshold: .55 }, knee: 1, margin: .15, textures: [sprite], box: new THREE.Box3(new THREE.Vector3(-1.06, -1.06, -1.06), new THREE.Vector3(1.06, 1.06, 1.06)),
+    poke() { pokeRise = .1; },
+    setPalette(cfg) { pal = derivePalette(cfg ?? {}); }, // full cfg per call; omitted axes reset to PALETTE_CFG
+    update(s, dt) {
+      const w = s.w;
+      spin += (.14 * w.idle + .36 * w.thinking + .55 * w.listening + .26 * w.speaking) * (1 + .8 * w.listening * s.level) * dt * s.pace;
+      poke = pokeRise > 0 ? (pokeRise = Math.max(0, pokeRise - dt), Math.min(.55, poke + dt * 5.5)) : (poke *= Math.exp(-dt / .22), poke < .025 ? 0 : poke);
+      // τ re-derived from the verified build: 1-exp(-dt/.00608) reproduces its exp(-dt/.25)
+      // per-frame release factor (.9355 @60fps) while staying frame-rate-independent.
+      speakE += (s.speak - speakE) * (s.speak > speakE ? 1 : 1 - Math.exp(-dt / .00608));
+      // Accumulated (paced) clock: Reduce Motion/sleep slows ripples, rings and jitter too,
+      // and a stall never snaps the phase (dt is clamped upstream).
+      u.uSpin.value = spin; u.uT.value += dt * s.pace; u.uLevel.value = s.level; u.uPoke.value = poke; u.uSpeak.value = speakE;
+      u.uW.value.set(w.idle, w.listening, w.thinking, w.speaking);
+      blend(u.uA.value, pal.A, w); blend(u.uB.value, pal.B, w);
+      u.uPx.value = STAGE_SCALE / ctx.unitsPerPixel;
+      look.bloom.strength = .18 + .42 * w.speaking * speakE + .14 * w.listening * s.level + .04 * w.listening + .03 * w.idle + .2 * poke;
+    } };
+  return look;
+};

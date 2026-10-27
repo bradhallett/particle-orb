@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Tide Orb</title>
+<style>html,body{margin:0;height:100%;background:#111;display:grid;place-items:center;overflow:hidden}
+canvas{max-width:100vw;max-height:100vh}
+#hud{position:fixed;left:8px;top:8px;color:#9cc;font:12px ui-monospace,monospace;user-select:none}
+button{margin-right:4px;background:#1d3a40;color:#cfe;border:1px solid #2e5a60;border-radius:4px;padding:3px 8px;cursor:pointer}
+button.on{background:#2e5a60}</style></head>
+<body>
+<div id="hud"><span id="name"></span><br>
+<button data-p="idle" class="on">idle</button><button data-p="active">listening</button>
+<button data-p="thinking">thinking</button><button data-p="speaking" id="b-speak">speaking</button>
+<button id="b-poke">poke</button></div>
+<script type="module">
+import { createProceduralAvatar } from './procedural-avatar.js';
+const slug = new URLSearchParams(location.search).get('slug') || 'tide';
+document.getElementById('name').textContent = slug;
+const avatar = await createProceduralAvatar(slug, { width: 640, height: 900 }).load();
+document.body.append(avatar.canvas);
+let phase = 'idle';
+const buttons = [...document.querySelectorAll('button[data-p]')];
+buttons.forEach(b => b.onclick = () => { phase = b.dataset.p; buttons.forEach(x => x.classList.toggle('on', x === b)); });
+document.getElementById('b-poke').onclick = () => avatar.look.poke?.();
+const t0 = performance.now();
+function frame(now) {
+  const t = (now - t0) / 1000;
+  // A synthetic voice: syllabic level while "speaking" is on.
+  const syl = Math.abs(Math.sin(t * 4.6) * .6 + Math.sin(t * 8.2) * .4);
+  const speaking = phase === 'speaking';
+  avatar.render(now, {
+    speaking, phase: phase === 'active' ? 'active' : 'idle', thinking: phase === 'thinking',
+    intensity: speaking ? .15 + .8 * syl : 0, reduce: false,
+  });
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script></body></html>

@@ -1,0 +1,13 @@
+--- a/procedural-characters.json
++++ b/procedural-characters.json
+@@ -18,3 +18,6 @@
+   {
+     "slug": "galaxy",
+     "name": "Galaxy Crystal",
+     "category": "abstract"
+   },
+   {
+     "slug": "particles",
+     "name": "Particle Orb",
+     "category": "abstract"
+   }
